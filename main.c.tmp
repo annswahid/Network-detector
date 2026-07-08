@@ -1,0 +1,110 @@
+#include "../include/monitor.h"
+
+void signal_handler(int sig) {
+    if (sig == SIGINT || sig == SIGTERM) {
+        write_log("Received shutdown signal");
+        running = 0;
+    }
+}
+
+void write_log(const char *message) {
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char timestamp[32];
+
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+    printf("[%s] %s\n", timestamp, message);
+
+    pthread_mutex_lock(&data_mutex);
+    if (log_count >= MAX_LOG_SIZE) {
+        memmove(logs, logs + 1, sizeof(log_entry) * (MAX_LOG_SIZE - 1));
+        log_count = MAX_LOG_SIZE - 1;
+    }
+    log_entry *entry = &logs[log_count++];
+    strncpy(entry->message, message, sizeof(entry->message) - 1);
+    entry->message[sizeof(entry->message) - 1] = '\0';
+    entry->timestamp = now;
+    pthread_mutex_unlock(&data_mutex);
+}
+
+int main(void) {
+    printf("\n");
+    printf("╔═════════════════════════════════════════════════╗\n");
+    printf("║     System Monitor Daemon - WSL2 Edition        ║\n");
+    printf("║     Press Ctrl+C to stop                        ║\n");
+    printf("╚═════════════════════════════════════════════════╝\n\n");
+
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+
+    write_log("System Monitor Daemon starting...");
+
+    /* ---- Start syscall monitor ---- */
+    start_syscall_monitor();
+    write_log("Syscall monitor started");
+
+    /* ---- Start system log monitor (BEFORE main loop) ---- */
+    pthread_t syslog_thread;
+    if (pthread_create(&syslog_thread, NULL, system_log_thread, NULL) != 0) {
+        write_log("ERROR: Cannot start system log thread");
+    } else {
+        write_log("System log monitor started");
+        // Detach so we don't need to join, it will end when process ends or we can check running in it
+        pthread_detach(syslog_thread);
+    }
+
+    /* ---- Start web server ---- */
+    pthread_t web_thread;
+    if (pthread_create(&web_thread, NULL, web_server_thread, NULL) != 0) {
+        write_log("ERROR: Cannot start web server thread");
+        return 1;
+    }
+    write_log("Web server started");
+    printf("📊 Dashboard: http://localhost:8080/api/stats\n\n");
+
+    int iteration = 0;
+
+    /* ================= MAIN LOOP ================= */
+    while (running) {
+        iteration++;
+
+        /* ---- Update system stats ---- */
+        update_system_stats();
+
+        /* ---- Process monitoring ---- */
+        scan_processes();
+
+        /* ---- Security analysis ---- */
+        if (iteration % 5 == 0) {
+            analyze_security();
+        }
+
+        if (iteration % 10 == 0) {
+            detect_attack_patterns();
+            current_threat_score = calculate_threat_score();
+        }
+
+        /* ---- Periodic status log ---- */
+        if (iteration % 30 == 0) {
+            pthread_mutex_lock(&data_mutex);
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     "Status: CPU=%.1f%% MEM=%.1f%% DISK=%.1f%% HEALTH=%d PROCS=%d",
+                     current_stats.cpu_usage,
+                     current_stats.memory_usage,
+                     current_stats.disk_usage,
+                     current_stats.health,
+                     process_count);
+            pthread_mutex_unlock(&data_mutex);
+            write_log(msg);
+        }
+
+        sleep(POLL_INTERVAL);
+    }
+
+    write_log("Shutting down...");
+    pthread_join(web_thread, NULL);
+    // syslog thread is detached or we can cancel it if we stored the id
+    write_log("System Monitor daemon stopped");
+    return 0;
+}

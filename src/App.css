@@ -1,0 +1,40 @@
+:root {
+  /* Primary Colors */
+  --primary-color: #00d9ff;
+  /* Electric cyan - modern tech look */
+  --primary-color-dim: #00b3d6;
+  --primary-color-bright: #33e3ff;
+
+  /* Surface & Background */
+  --bg-color: #0d1117;
+  /* GitHub-dark inspired */
+  --surface-color: #161b22;
+  /* Elevated surface */
+  --surface-hover: #1f262e;
+  /* For card hover state */
+
+  /* Text Colors */
+  --primary-text-color: #f0f6fc;
+  /* Crisp white-blue */
+  --secondary-text-color: #7d8590;
+  /* Soft gray for secondary text */
+
+  /* Status Colors (for monitoring states) */
+  --status-healthy: #3fb950;
+  /* Fresh green - healthy/up */
+  --status-warning: #d29922;
+  /* Gold - warning */
+  --status-error: #f85149;
+  /* Coral red - error/down */
+  --status-info: #58a6ff;
+  /* Sky blue - info */
+
+  /* Accents & Borders */
+  --border-color: #21262d;
+  --border-active: #00d9ff;
+
+  /* Shadows & Glows */
+  --glow-primary: rgba(0, 217, 255, 0.2);
+  --glow-primary-strong: rgba(0, 217, 255, 0.4);
+  --shadow-dark: rgba(0, 0, 0, 0.6);
+}

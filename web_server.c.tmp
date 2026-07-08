@@ -1,0 +1,254 @@
+#include "../include/monitor.h"
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <string.h>
+
+#define API_PORT 8081
+#define BUFFER_SIZE 32768
+
+const char *health_to_string(system_health_t h) {
+    switch (h) {
+        case HEALTH_GOOD: return "good";
+        case HEALTH_WARNING: return "warning";
+        case HEALTH_CRITICAL: return "critical";
+        default: return "unknown";
+    }
+}
+
+/* Must be called with data_mutex LOCKED */
+void build_logs_json_safe(char *output, size_t size) {
+    char logs_json[16384] = "[";
+    int count = 0;
+    
+    for (int i = log_count - 1; i >= 0 && count < 50; i--) {
+        char log_item[512];
+        char safe_message[256];
+        int k = 0;
+        for (int j = 0; logs[i].message[j] != '\0' && k < 250; j++) {
+            if (logs[i].message[j] == '"') {
+                safe_message[k++] = '\\';
+                safe_message[k++] = '"';
+            } else if (logs[i].message[j] == '\\') {
+                safe_message[k++] = '\\';
+                safe_message[k++] = '\\';
+            } else if (logs[i].message[j] >= 32 && logs[i].message[j] <= 126) {
+                safe_message[k++] = logs[i].message[j];
+            }
+        }
+        safe_message[k] = '\0';
+
+        snprintf(log_item, sizeof(log_item),
+                 "%s{\"timestamp\":%ld,\"message\":\"%s\"}",
+                 (count > 0) ? "," : "",
+                 logs[i].timestamp,
+                 safe_message);
+
+        if (strlen(logs_json) + strlen(log_item) < sizeof(logs_json) - 2) {
+            strcat(logs_json, log_item);
+            count++;
+        } else {
+            break;
+        }
+    }
+    strcat(logs_json, "]");
+    strncpy(output, logs_json, size - 1);
+    output[size - 1] = '\0';
+}
+
+void build_threat_data_json(char *output, size_t size) {
+    security_event_t events[100];
+    int event_count = get_events_in_window(events, 100);
+
+    char events_json[4096] = "[";
+    for (int i = 0; i < event_count && i < 20; i++) {
+        char event_item[256];
+        const char *event_type_str = "UNKNOWN";
+
+        switch (events[i].type) {
+            case EVENT_PROCESS_CREATED: event_type_str = "PROCESS_CREATED"; break;
+            case EVENT_HIGH_CPU_USAGE: event_type_str = "HIGH_CPU"; break;
+            case EVENT_HIGH_MEMORY_USAGE: event_type_str = "HIGH_MEMORY"; break;
+            case EVENT_SUSPICIOUS_PROCESS: event_type_str = "SUSPICIOUS"; break;
+            default: break;
+        }
+
+        snprintf(event_item, sizeof(event_item),
+                 "%s{\"type\":\"%s\",\"severity\":%d,\"timestamp\":%ld}",
+                 (i > 0) ? "," : "",
+                 event_type_str,
+                 events[i].severity,
+                 events[i].timestamp);
+
+        strncat(events_json, event_item,
+                sizeof(events_json) - strlen(events_json) - 1);
+    }
+    strcat(events_json, "]");
+
+    char patterns_json[2048] = "[";
+    for (int i = 0; i < pattern_count; i++) {
+        char pattern_item[256];
+        snprintf(pattern_item, sizeof(pattern_item),
+                 "%s{\"name\":\"%s\",\"count\":%d,\"threat_level\":%d}",
+                 (i > 0) ? "," : "",
+                 detected_patterns[i].pattern_name,
+                 detected_patterns[i].event_count,
+                 detected_patterns[i].threat_level);
+
+        strncat(patterns_json, pattern_item,
+                sizeof(patterns_json) - strlen(patterns_json) - 1);
+    }
+    strcat(patterns_json, "]");
+
+    snprintf(output, size,
+             "\"threat_score\":{"
+             "\"base\":%.2f,"
+             "\"frequency\":%.2f,"
+             "\"severity\":%.2f,"
+             "\"pattern\":%.2f,"
+             "\"final\":%.2f,"
+             "\"level\":\"%s\""
+             "},"
+             "\"security_events\":%s,"
+             "\"attack_patterns\":%s,"
+             "\"events_in_window\":%d",
+             current_threat_score.base_score,
+             current_threat_score.frequency_multiplier,
+             current_threat_score.severity_multiplier,
+             current_threat_score.pattern_multiplier,
+             current_threat_score.final_score,
+             get_threat_level_string(current_threat_score.final_score),
+             events_json,
+             patterns_json,
+             event_count);
+}
+
+void send_cors_preflight(int client_socket) {
+    const char *response =
+        "HTTP/1.1 200 OK\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type\r\n"
+        "Content-Length: 0\r\n"
+        "\r\n";
+    write(client_socket, response, strlen(response));
+}
+
+void handle_api_request(int client_socket, const char *request) {
+    if (strstr(request, "OPTIONS")) {
+        send_cors_preflight(client_socket);
+        return;
+    }
+
+    char response[BUFFER_SIZE];
+    char json_data[BUFFER_SIZE];
+
+    if (strstr(request, "GET /api/stats")) {
+        // Critical section: Lock while reading global stats AND logs
+        pthread_mutex_lock(&data_mutex);
+        
+        system_stats_t stats = current_stats;
+        int local_process_count = process_count;
+        
+        // Build log JSON while holding the lock
+        char logs_data[16384];
+        build_logs_json_safe(logs_data, sizeof(logs_data));
+        
+        pthread_mutex_unlock(&data_mutex);
+
+        // Threat data uses its own logic/storage (check thread safety if needed, 
+        // usually event_buffer is separate or needs event_mutex)
+        char threat_data[8192];
+        build_threat_data_json(threat_data, sizeof(threat_data));
+
+        snprintf(json_data, sizeof(json_data),
+                 "{"
+                 "\"cpu_usage\":%.2f,"
+                 "\"memory_usage\":%.2f,"
+                 "\"disk_usage\":%.2f,"
+                 "\"health\":\"%s\","
+                 "\"network_rx\":%lu,"
+                 "\"network_tx\":%lu,"
+                 "\"timestamp\":%ld,"
+                 "\"process_count\":%d,"
+                 "\"logs\":%s,"
+                 "%s"
+                 "}",
+                 stats.cpu_usage,
+                 stats.memory_usage,
+                 stats.disk_usage,
+                 health_to_string(stats.health),
+                 stats.network_rx,
+                 stats.network_tx,
+                 stats.timestamp,
+                 local_process_count,
+                 logs_data,
+                 threat_data);
+
+        snprintf(response, sizeof(response),
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: application/json\r\n"
+                 "Access-Control-Allow-Origin: *\r\n"
+                 "Content-Length: %ld\r\n"
+                 "\r\n"
+                 "%s",
+                 strlen(json_data), json_data);
+
+    } else {
+        const char *not_found = "{\"error\":\"Not found\"}";
+        snprintf(response, sizeof(response),
+                 "HTTP/1.1 404 Not Found\r\n"
+                 "Content-Type: application/json\r\n"
+                 "Access-Control-Allow-Origin: *\r\n"
+                 "Content-Length: %ld\r\n"
+                 "\r\n"
+                 "%s",
+                 strlen(not_found), not_found);
+    }
+
+    write(client_socket, response, strlen(response));
+}
+
+void *web_server_thread(void *arg) {
+    (void)arg;
+    int server_socket, client_socket;
+    struct sockaddr_in server_addr, client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    char buffer[4096];
+
+    server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_socket < 0) {
+        write_log("ERROR: Cannot create web server socket");
+        return NULL;
+    }
+
+    int opt = 1;
+    setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(API_PORT);
+
+    if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        write_log("ERROR: Cannot bind web server");
+        close(server_socket);
+        return NULL;
+    }
+
+    listen(server_socket, 10);
+    write_log("Web API server started on port 8080");
+
+    while (running) {
+        client_socket = accept(server_socket, (struct sockaddr*)&client_addr, &client_len);
+        if (client_socket < 0) continue;
+        int bytes_read = read(client_socket, buffer, sizeof(buffer) - 1);
+        if (bytes_read > 0) {
+            buffer[bytes_read] = '\0';
+            handle_api_request(client_socket, buffer);
+        }
+        close(client_socket);
+    }
+    close(server_socket);
+    return NULL;
+}

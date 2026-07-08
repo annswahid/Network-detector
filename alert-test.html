@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Alert Test</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1a1a2e; color: #eee; }
+        .alert { padding: 10px; margin: 10px 0; border-left: 4px solid; }
+        .warning { border-color: #fbbf24; background: rgba(251, 191, 36, 0.1); }
+        .critical { border-color: #ef4444; background: rgba(239, 68, 68, 0.1); }
+        pre { background: #000; padding: 15px; overflow: auto; }
+    </style>
+</head>
+<body>
+    <h1>🚨 Alert Test Page</h1>
+    <p>Testing if alerts are being returned from the API...</p>
+    
+    <button onclick="fetchAlerts()">Fetch Alerts Now</button>
+    
+    <h2>Raw API Response:</h2>
+    <pre id="raw"></pre>
+    
+    <h2>Parsed Alerts:</h2>
+    <div id="alerts"></div>
+    
+    <script>
+        async function fetchAlerts() {
+            try {
+                const response = await fetch('http://localhost:3001/api/threat-history');
+                const data = await response.json();
+                
+                // Show raw response
+                document.getElementById('raw').textContent = JSON.stringify(data, null, 2);
+                
+                // Show parsed alerts
+                const alertsDiv = document.getElementById('alerts');
+                if (data.alerts && data.alerts.length > 0) {
+                    alertsDiv.innerHTML = data.alerts.map(alert => 
+                        `<div class="alert ${alert.severity}">
+                            <strong>[${alert.severity.toUpperCase()}] ${alert.type}</strong><br>
+                            ${alert.message}<br>
+                            <small>${alert.timestamp}</small>
+                        </div>`
+                    ).join('');
+                } else {
+                    alertsDiv.innerHTML = '<p>❌ No alerts found in response</p>';
+                }
+            } catch (err) {
+                document.getElementById('raw').textContent = 'ERROR: ' + err.message;
+                document.getElementById('alerts').innerHTML = '<p>❌ Failed to fetch</p>';
+            }
+        }
+        
+        // Auto-fetch on load
+        fetchAlerts();
+        // Auto-refresh every 3 seconds
+        setInterval(fetchAlerts, 3000);
+    </script>
+</body>
+</html>
